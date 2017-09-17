@@ -1,0 +1,138 @@
+---
+title: "Data Science Capstone Milestone Report"
+author: "E. Moller"
+date: "August 4, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("~/Documents/Lisa/Coursera/Capstone")
+```
+
+## Objective
+
+The objectives of the Milestone Report are to show familiarity with the dataset by loading, cleaning and exploring properties of the dataset, and begin planning the forthcoming application and algorithm.
+
+## Getting and Cleaning the Data
+
+```{r}
+library(stringi)
+library(tm)
+library(SnowballC)
+library(RWeka)
+```
+
+Download the data...
+```{r}
+if (!file.exists("Coursera-SwiftKey.zip")){
+  download.file("https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip",destfile = "Coursera-Swiftkey.zip")
+  unzip("Coursera-SwiftKey.zip")
+}
+```
+
+There are four languages sets of files included in the zip file - English, Finnish, German and Russian - we will just use the english set for now.
+```{r}
+blogs <- readLines("final/en_US/en_US.blogs.txt",skipNul = TRUE)
+news <- readLines("final/en_US/en_US.news.txt",skipNul = TRUE)
+twitter <- readLines("final/en_US/en_US.twitter.txt",skipNul = TRUE)
+```
+
+### Basic Summaries to Explore the data
+
+Number of Words
+```{r}
+blogsWords <- stri_count_words(blogs)
+newsWords <- stri_count_words(news)
+twitterWords <- stri_count_words(twitter)
+```
+
+Number of Lines in Each File
+```{r}
+blogsLines <- length(blogs)
+newsLines <- length(news)
+twitterLines <- length(twitter)
+```
+
+Print Summary of Word and Line Counts
+```{r}
+data.frame(File=c("blogs","news","twitter"),Wordcount=c(sum(blogsWords),sum(newsWords),sum(twitterWords)),Linecount=c(blogsLines,newsLines,twitterLines))
+```
+
+### Take a Sample of the Data
+
+These are very large datasets, so we should take a sample of the datasets to manipulate.
+```{r}
+#Take a sample
+blogs <- blogs[rbinom(blogsLines*.005,blogsLines,.5)]
+news <- news[rbinom(newsLines*.005,newsLines,.5)]
+twitter <- twitter[rbinom(twitterLines*.005,twitterLines,.5)]
+
+#Put into one file
+sampleData <- c(blogs,news,twitter)
+
+```
+
+### Get Number of Words and Lines in Sample Dataset
+```{r}
+sum(stri_count_words(sampleData))
+```
+```{r}
+length(sampleData)
+```
+
+### Put Data into Separate Directory to Clean
+```{r}
+dir.create("sampleDataDir/", showWarnings = FALSE)
+writeLines(sampleData, "./sampleDataDir/sampleData.csv")
+sampleData <- Corpus(DirSource("./sampleDataDir"))
+```
+
+### Clean the Data
+
+We will use the tm package to clean the data.
+```{r}
+# Remove extra whitespace - multiple whitespace characters are collapsed to a single blank.
+sampleData <- tm_map(sampleData, stripWhitespace)
+
+# Remove punctuation marks from the document
+sampleData <- tm_map(sampleData, removePunctuation)
+
+# Remove numbers from the document
+sampleData <- tm_map(sampleData, removeNumbers)
+
+# Make all letters lowercase
+sampleData <- tm_map(sampleData, content_transformer(tolower))
+
+# Stem words - stem words in a text document using Porter's stemming algorithm.
+sampleData <- tm_map(sampleData, stemDocument)
+
+```
+
+## Exploratory Analysis
+
+To explore the data, we will look at the n-grams (bigrams and trigrams) - "In the fields of computational linguistics and probability, an n-gram is a contiguous sequence of n items from a given sequence of text or speech. The items can be phonemes, syllables, letters, words or base pairs according to the application." With the ultimate goal of wanting to predict the following word, we need to have a base of understanding of what pairs or triads of words are most often seen together. We will have to eventually figure out what to do with an unexpected word.
+
+### Bigrams
+```{r}
+bigram <- NGramTokenizer(sampleData, Weka_control(min = 2, max = 2))
+frequency.bigram <- data.frame(table(bigram))
+order.bigram <- frequency.bigram[order(frequency.bigram$Freq,decreasing = TRUE),]
+top10bigram <- head(order.bigram,10)
+barplot(top10bigram$Freq, names.arg = top10bigram$bigram, border=NA, las=2, main="10 Most Frequent BiGrams", cex.main=2)
+```
+
+### Trigrams
+```{r}
+trigram <- NGramTokenizer(sampleData, Weka_control(min = 3, max = 3))
+frequency.trigram <- data.frame(table(trigram))
+order.trigram <- frequency.trigram[order(frequency.trigram$Freq,decreasing = TRUE),]
+top10trigram <- head(order.trigram,10)
+barplot(top10trigram$Freq, names.arg = top10trigram$trigram, border=NA, las=2, main="10 Most Frequent TriGrams", cex.main=2)
+```
+
+## Plans for Creating a Prediction Algroithm and Shiny App
+
+I would like to make more small samples to test models.
+
+For modeling, I would like to use the n-grams to create a predictive model. My app will display three word choices for the next predicted word. I would like to play with taking out the "stop words" - i.e. - is, in, the. This seems to be a lot of the bigram words, so possibly doing another bigram without those words as well.
