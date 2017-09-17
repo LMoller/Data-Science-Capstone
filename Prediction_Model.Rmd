@@ -1,0 +1,189 @@
+---
+title: "Data Science Capstone Prediction Model"
+author: "E. Moller"
+date: "September 15, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("~/Documents/Lisa/Coursera/Capstone")
+```
+
+```{r}
+library(stringi)
+library(tm)
+library(SnowballC)
+library(RWeka)
+library(RSQLite)
+library(slam)
+library(data.table)
+library(magrittr)
+library(stringr)
+```
+
+```{r}
+blogs <- readLines("final/en_US/en_US.blogs.txt",skipNul = TRUE)
+news <- readLines("final/en_US/en_US.news.txt",skipNul = TRUE)
+twitter <- readLines("final/en_US/en_US.twitter.txt",skipNul = TRUE)
+```
+
+Number of Lines in Each File
+```{r}
+blogsLines <- length(blogs)
+newsLines <- length(news)
+twitterLines <- length(twitter)
+```
+
+
+### Take a Sample of the Data
+
+These are very large datasets, so we should take a sample of the datasets to manipulate.
+```{r}
+#Take a sample
+set.seed(1624)
+blogsSample <- blogs[rbinom(blogsLines*.01,blogsLines,.5)]
+newsSample <- news[rbinom(newsLines*.01,newsLines,.5)]
+twitterSample <- twitter[rbinom(twitterLines*.01,twitterLines,.5)]
+
+#Put into one file
+sampleData <- c(blogsSample,newsSample,twitterSample)
+```
+
+
+### Create a Corpus
+```{r}
+dir.create("sampleDataDir/", showWarnings = FALSE)
+writeLines(sampleData, "./sampleDataDir/sampleData.csv")
+sampleData <- Corpus(DirSource("./sampleDataDir"))
+```
+
+### Clean the Data
+
+We will use the tm package to clean the data.
+```{r}
+# Remove extra whitespace - multiple whitespace characters are collapsed to a single blank.
+sampleData <- tm_map(sampleData, stripWhitespace)
+
+# Remove punctuation marks from the document
+sampleData <- tm_map(sampleData, removePunctuation)
+
+# Remove numbers from the document
+sampleData <- tm_map(sampleData, removeNumbers)
+
+# Make all letters lowercase
+sampleData <- tm_map(sampleData, content_transformer(tolower))
+
+# Stem words - stem words in a text document using Porter's stemming algorithm.
+sampleData <- tm_map(sampleData, stemDocument)
+
+```
+
+### Tokenizer
+```{r}
+
+bigram <- NGramTokenizer(sampleData, Weka_control(min = 2, max = 2))
+trigram <- NGramTokenizer(sampleData, Weka_control(min = 3, max = 3))
+quadgram <- NGramTokenizer(sampleData, Weka_control(min = 4, max = 4))
+```
+
+
+### Get Frequencies
+```{r}
+# Bigram
+frequency.bigram <- data.frame(table(bigram),stringsAsFactors=FALSE)
+colnames(frequency.bigram) <- c("word", "freq")
+order.bigram <- frequency.bigram[order(frequency.bigram$freq,decreasing = TRUE),]
+order.bigram$word <- as.character(order.bigram$word)
+order.bigram <- data.table(order.bigram)
+
+
+# Trigram
+frequency.trigram <- data.frame(table(trigram),stringsAsFactors=FALSE)
+colnames(frequency.trigram) <- c("word", "freq")
+order.trigram <- frequency.trigram[order(frequency.trigram$freq,decreasing = TRUE),]
+order.trigram$word <- as.character(order.trigram$word)
+order.trigram <- data.table(order.trigram)
+
+# Quadgram
+frequency.quadgram <- data.frame(table(quadgram),stringsAsFactors=FALSE)
+colnames(frequency.quadgram) <- c("word", "freq")
+order.quadgram <- frequency.quadgram[order(frequency.quadgram$freq,decreasing = TRUE),]
+order.quadgram$word <- as.character(order.quadgram$word)
+order.quadgram <- data.table(order.quadgram)
+```
+
+### Create SQL Table
+```{r}
+db <- dbConnect(SQLite(), dbname="nGramdb.db")
+dbSendQuery(conn=db,
+            "CREATE TABLE nGram
+            (gram TEXT,
+             prior TEXT,
+             word TEXT,
+             freq INTEGER,
+             n INTEGER, PRIMARY KEY (gram))")
+
+```
+
+### Add to nGram datatable - Prior and Current Word
+```{r}
+order.bigram[,c("prior","cur"):=list(unlist(strsplit(word,"[ ]+?[a-z]+$")),           unlist(strsplit(word, "^([a-z]+[ ])+"))[2]),by=word]
+
+order.trigram[,c("prior","cur"):=list(unlist(strsplit(word,"[ ]+?[a-z]+$")),
+      unlist(strsplit(word, "^([a-z]+[ ])+"))[2]),by=word]
+
+order.quadgram[,c("prior","cur"):=list(unlist(strsplit(word,
+      "[ ]+?[a-z]+$")),unlist(strsplit(word, "^([a-z]+[ ])+"))[2]), by=word]
+```
+
+### Insert to SQL database
+```{r}
+dbBegin(db)
+sql2 <- dbSendStatement(db, "INSERT INTO nGram VALUES ($word,$prior,$cur,$freq,2)")
+dbBind(sql2,order.bigram)
+dbCommit(db)
+
+dbBegin(db)
+sql3 <- dbSendStatement(db, "INSERT INTO nGram VALUES ($word,$prior,$cur,$freq,3)")
+dbBind(sql3,order.trigram)
+dbCommit(db)
+
+dbBegin(db)
+sql4 <- dbSendStatement(db, "INSERT INTO nGram VALUES ($word,$prior,$cur,$freq,4)")
+dbBind(sql4,order.quadgram)
+dbCommit(db)
+```
+
+### Prediction
+```{r}
+predictWord <- function(orig, db) {
+  # "Stupid Backoff" - Check if n-gram exists. If the n-gram does not exist, multiply by alpha and back off to lower gram model. In this case, alpha is not needed, simple back off to a lower gram model.
+  
+  max = 3  # the maximum n-gram used was 4, so 4 - 1
+  
+  # Clean the original sentence
+  cleaned <- tolower(orig) %>%
+    removePunctuation %>%
+    removeNumbers %>%
+    stripWhitespace %>%
+    str_trim %>%
+    strsplit(split=" ") %>%
+    unlist
+  
+  for (i in min(length(cleaned), max):1) {
+    gram <- paste(tail(cleaned, i), collapse=" ")
+    sql <- paste("SELECT word, freq FROM nGram WHERE ", 
+                 " prior=='", paste(gram), "'",
+                 " AND n==", i + 1, " LIMIT 5", sep="")
+    res <- dbSendQuery(conn=db, sql)
+    predicted <- dbFetch(res, n=-1)
+    names(predicted) <- c("Word Prediction", "Score (Adjusted Freq)")
+    print(predicted)
+    
+    if (nrow(predicted) > 0) return(predicted)
+  }
+  
+  return("I do not have a prediction.")
+}
+```
